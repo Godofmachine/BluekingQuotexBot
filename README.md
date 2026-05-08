@@ -1,3 +1,13 @@
+---
+title: BluekingQuotexBot
+emoji: 🚀
+colorFrom: blue
+colorTo: indigo
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 # 🚀 Antigravity: Production-Ready Quotex Auto-Trading Bot
 
 Antigravity is a high-performance, autonomous trading infrastructure built for Windows environments. It leverages the `pyquotex` library to interface with the Quotex platform, executing trades based on dynamic strategies with real-time monitoring and Telegram integration.
