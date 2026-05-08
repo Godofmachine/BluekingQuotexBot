@@ -12,7 +12,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/html")
         self.end_headers()
-        self.wfile.write(b"<html><body><h1>🚀 Antigravity Bot is Running!</h1><p>Monitoring markets 24/7...</p></body></html>")
+        self.wfile.write("<html><body><h1>🚀 Antigravity Bot is Running!</h1><p>Monitoring markets 24/7...</p></body></html>".encode('utf-8'))
 
 def run_web_server():
     with socketserver.TCPServer(("", PORT), Handler) as httpd:
