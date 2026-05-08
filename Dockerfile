@@ -5,14 +5,19 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
+# Create a non-root user
+RUN useradd -m -u 1000 user
+USER user
+ENV PATH="/home/user/.local/bin:$PATH"
+
+WORKDIR /home/user/app
 
 # Copy requirements and install
-COPY requirements.txt .
+COPY --chown=user requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the pyquotex library (from parent dir)
-COPY . .
+# Copy the rest of the code
+COPY --chown=user . .
 
 # Hugging Face uses port 7860
 EXPOSE 7860
