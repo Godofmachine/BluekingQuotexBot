@@ -34,10 +34,11 @@ class QuotexBroker:
 
     async def get_balance(self) -> float:
         try:
-            return await self.client.get_balance()
+            balance = await self.client.get_balance()
+            return balance
         except Exception as e:
             logger.error(f"Error getting balance: {e}")
-            return 0.0
+            raise e
 
     async def get_candles(self, pair: str, timeframe_seconds: int, amount: int = 100) -> List[Dict]:
         """Fetch recent candles."""

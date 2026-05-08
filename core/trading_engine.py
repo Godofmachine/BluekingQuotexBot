@@ -73,7 +73,7 @@ class TradingEngine:
             except Exception as e:
                 logger.error(f"Error reloading strategy: {e}")
 
-    def get_stats(self) -> Dict:
+    async def get_stats(self) -> Dict:
         uptime = str(datetime.now() - self.start_time).split('.')[0]
         wins = sum(1 for t in self.history if t.get('result') == 'win')
         losses = sum(1 for t in self.history if t.get('result') == 'loss')
@@ -81,6 +81,12 @@ class TradingEngine:
         win_rate = (wins / total * 100) if total > 0 else 0
         profit = sum(t.get('profit', 0) for t in self.history)
         
+        balance = 0.0
+        try:
+            balance = await self.broker.get_balance()
+        except:
+            pass
+            
         return {
             "uptime": uptime,
             "wins": wins,
@@ -89,7 +95,7 @@ class TradingEngine:
             "profit": profit,
             "pair": self.config.pair if self.config else "N/A",
             "consecutive_losses": self.risk_manager.consecutive_losses if self.risk_manager else 0,
-            "balance": 0.0 # Will be updated in loop
+            "balance": balance
         }
 
     async def run(self):

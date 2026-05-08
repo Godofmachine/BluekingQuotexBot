@@ -75,7 +75,7 @@ class TelegramNotifier:
 
     async def _status_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.engine: return
-        stats = self.engine.get_stats()
+        stats = await self.engine.get_stats()
         status_msg = f"""
 📊 *Dashboard*
 ━━━━━━━━━━━━━━
@@ -93,8 +93,11 @@ class TelegramNotifier:
         await update.message.reply_text(status_msg, parse_mode=ParseMode.MARKDOWN)
 
     async def _balance_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        balance = await self.engine.broker.get_balance()
-        await update.message.reply_text(f"💰 Current Balance: *${balance:.2f}*", parse_mode=ParseMode.MARKDOWN)
+        try:
+            balance = await self.engine.broker.get_balance()
+            await update.message.reply_text(f"💰 Current Balance: *${balance:.2f}*", parse_mode=ParseMode.MARKDOWN)
+        except Exception as e:
+            await update.message.reply_text(f"⚠️ *Error fetching balance:* `{str(e)}`", parse_mode=ParseMode.MARKDOWN)
 
     async def _wins_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         stats = self.engine.get_stats()
