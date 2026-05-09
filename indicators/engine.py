@@ -1,5 +1,4 @@
 import pandas as pd
-import pandas_ta as ta
 from typing import List, Dict, Optional, Tuple
 
 class IndicatorEngine:
@@ -11,10 +10,16 @@ class IndicatorEngine:
         df = pd.DataFrame(candles)
         df.rename(columns={'at': 'timestamp'}, inplace=True)
         
-        # Core Indicators
-        df[f'EMA_{ema_fast}'] = ta.ema(df['close'], length=ema_fast)
-        df[f'EMA_{ema_slow}'] = ta.ema(df['close'], length=ema_slow)
-        df[f'RSI_{rsi_period}'] = ta.rsi(df['close'], length=rsi_period)
+        # Core Indicators (Calculated manually with pandas to avoid pandas_ta/numba)
+        df[f'EMA_{ema_fast}'] = df['close'].ewm(span=ema_fast, adjust=False).mean()
+        df[f'EMA_{ema_slow}'] = df['close'].ewm(span=ema_slow, adjust=False).mean()
+        
+        # Standard RSI formula
+        delta = df['close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=rsi_period).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=rsi_period).mean()
+        rs = gain / loss
+        df[f'RSI_{rsi_period}'] = 100 - (100 / (1 + rs))
         
         # Patterns
         df['bullish_engulfing'] = (df['close'].shift(1) < df['open'].shift(1)) & \
