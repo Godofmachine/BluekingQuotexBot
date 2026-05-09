@@ -9,7 +9,9 @@ logger = logging.getLogger("antigravity.broker")
 
 class QuotexBroker:
     def __init__(self, email: str, password: str, environment: str = "DEMO"):
-        self.client = Quotex(email=email, password=password, lang="en")
+        # Force a realistic browser User-Agent to bypass data center blocks
+        user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        self.client = Quotex(email, password, lang="en", user_agent=user_agent)
         self.environment = AccountType.REAL if environment.upper() == "REAL" else AccountType.DEMO
         self.is_connected = False
 
