@@ -14,8 +14,8 @@ import asyncio
 import os
 from main import main as start_bot
 
-# 1. Tiny Web Server to keep Hugging Face alive
-PORT = 7860
+# 1. Tiny Web Server to keep Cloud alive
+PORT = int(os.getenv("PORT", 7860))
 class Handler(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
