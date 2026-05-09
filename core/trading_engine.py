@@ -6,7 +6,7 @@ import time
 import re
 import pandas as pd
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from core.broker import QuotexBroker
 from core.strategy_parser import StrategyParser, StrategyConfig
 from core.risk_manager import RiskManager
@@ -53,23 +53,15 @@ class TradingEngine:
                 new_config = StrategyParser.parse_file(self.strategy_path)
                 if not self.config or new_config != self.config:
                     self.config = new_config
-                    # Update risk manager if config changed
                     if not self.risk_manager:
                         self.risk_manager = RiskManager(
-                            initial_amount=self.config.trade_amount,
-                            martingale_enabled=self.config.martingale,
                             max_consecutive_losses=self.config.max_consecutive_losses,
                             stop_loss=self.config.stop_loss,
                             take_profit=self.config.take_profit
                         )
-                    else:
-                        self.risk_manager.initial_amount = self.config.trade_amount
-                        self.risk_manager.martingale_enabled = self.config.martingale
-                        self.risk_manager.max_consecutive_losses = self.config.max_consecutive_losses
-                    
                     self.last_strategy_mtime = mtime
                     logger.info(f"Strategy reloaded: {self.config.pair}")
-                    await self.telegram.send_notification(f"🔄 *Strategy Updated*\nPair: {self.config.pair}\nAmount: {self.config.trade_amount}")
+                    await self.telegram.send_notification(f"🔄 *Strategy Updated*\nPair: {self.config.pair}")
             except Exception as e:
                 logger.error(f"Error reloading strategy: {e}")
 
@@ -106,31 +98,36 @@ class TradingEngine:
             try:
                 await self.reload_strategy()
                 
-                if self.is_paused or (self.risk_manager and self.risk_manager.is_paused):
-                    if self.risk_manager and self.risk_manager.is_paused:
-                        logger.warning(f"Engine PAUSED by Risk Manager: {self.risk_manager.pause_reason}")
-                        await self.telegram.send_notification(f"⚠️ *Risk Manager PAUSE*\nReason: {self.risk_manager.pause_reason}")
-                        # Auto-reset after some time or wait for command? 
-                        # For now, let's wait 5 mins or until manual resume
-                        await asyncio.sleep(300) 
-                    else:
-                        await asyncio.sleep(1)
+                # Initial balance for risk manager
+                current_balance = await self.broker.get_balance()
+                self.risk_manager.set_starting_balance(current_balance)
+                
+                # Check daily limits
+                can_trade, reason = self.risk_manager.can_trade(current_balance)
+                if not can_trade:
+                    if not self.is_paused:
+                        logger.warning(f"Engine PAUSED: {reason}")
+                        await self.telegram.send_notification(f"⚠️ *Trading Paused*\nReason: {reason}")
+                        self.is_paused = True
+                    await asyncio.sleep(60)
                     continue
+                else:
+                    self.is_paused = False
 
                 if not await self.broker.ensure_connection():
                     await asyncio.sleep(5)
                     continue
 
-                # Get data
+                # Fetch candles
                 pair = self.config.pair
                 timeframe_sec = self._parse_timeframe(self.config.timeframe)
+                candles = await self.broker.get_candles(pair, timeframe_sec, amount=100)
                 
-                candles = await self.broker.get_candles(pair, timeframe_sec)
                 if not candles:
                     await asyncio.sleep(self.config.polling_interval)
                     continue
 
-                # Calculate indicators
+                # Indicators & Patterns
                 df = IndicatorEngine.calculate_indicators(
                     candles, 
                     self.config.ema_fast, 
@@ -138,15 +135,16 @@ class TradingEngine:
                     self.config.rsi_period
                 )
                 
-                if df.empty:
+                if df.empty or len(df) < 30:
                     await asyncio.sleep(1)
                     continue
 
-                # Check for signal
-                signal = self._evaluate_signal(df)
+                # Signal Logic
+                direction, grade, expiry_min = self._evaluate_signal(df)
                 
-                if signal and (time.time() - self.last_trade_time > self.config.cooldown_seconds):
-                    await self._execute_signal(signal)
+                if direction != "SKIP" and (time.time() - self.last_trade_time > self.config.cooldown_seconds):
+                    stake = self.risk_manager.calculate_stake(current_balance, grade)
+                    await self._execute_signal(direction, stake, expiry_min * 60, grade)
 
                 await asyncio.sleep(self.config.polling_interval)
                 
@@ -160,80 +158,68 @@ class TradingEngine:
         if tf.endswith('s'): return int(tf[:-1])
         return 60
 
-    def _evaluate_signal(self, df: pd.DataFrame) -> Optional[str]:
-        if not self.config.entry_rule:
-            return self._fallback_signal(df)
+    def _evaluate_signal(self, df: pd.DataFrame) -> Tuple[str, Optional[str], Optional[int]]:
+        last = df.iloc[-1]
+        prev = df.iloc[-2]
+        
+        # S/R
+        support, resistance, touch_s, touch_r = IndicatorEngine.find_support_resistance(df)
+        
+        rsi = last[f'RSI_{self.config.rsi_period}']
+        ema = last[f'EMA_{self.config.ema_slow}']
+        
+        # Patterns
+        bear_engulf = last['bearish_engulfing']
+        bull_engulf = last['bullish_engulfing']
+        tweezer_top = last['tweezer_top']
+        tweezer_bottom = last['tweezer_bottom']
+        piercing = last['piercing_pattern']
+        dark_cloud = last['dark_cloud_cover']
+        
+        # Grade A (1-min)
+        if (bear_engulf or tweezer_top or dark_cloud) and rsi > 60:
+            return "put", "A", 1
+        if (bull_engulf or tweezer_bottom or piercing) and rsi < 40:
+            return "call", "A", 1
             
-        rule = self.config.entry_rule.lower()
-        
-        # Simple dynamic evaluation for EMA and RSI
-        # Example: BUY when EMA_FAST crosses above EMA_SLOW and RSI < 30
-        
-        fast_ema = df[f'EMA_{self.config.ema_fast}'].iloc[-1]
-        slow_ema = df[f'EMA_{self.config.ema_slow}'].iloc[-1]
-        rsi = df[f'RSI_{self.config.rsi_period}'].iloc[-1]
-        
-        crossover = IndicatorEngine.check_crossover(df, f'EMA_{self.config.ema_fast}', f'EMA_{self.config.ema_slow}')
-        
-        is_buy = "buy" in rule
-        is_sell = "sell" in rule
-        
-        # Check conditions in rule string
-        conditions_met = True
-        
-        if "crosses above" in rule and crossover != "up":
-            conditions_met = False
-        if "crosses below" in rule and crossover != "down":
-            conditions_met = False
-        if "rsi <" in rule:
-            limit = float(re.search(r"rsi < (\d+)", rule).group(1))
-            if rsi >= limit: conditions_met = False
-        if "rsi >" in rule:
-            limit = float(re.search(r"rsi > (\d+)", rule).group(1))
-            if rsi <= limit: conditions_met = False
+        # Grade B (2-min) - Rejection at S/R
+        if touch_r >= 2 and last['high'] >= resistance and last['close'] < last['open']:
+            return "put", "B", 2
+        if touch_s >= 2 and last['low'] <= support and last['close'] > last['open']:
+            return "call", "B", 2
             
-        if conditions_met:
-            return "call" if is_buy else "put"
+        # Grade C (5-min) - Trend following with RSI
+        if rsi < 30 and last['close'] > ema:
+            return "call", "C", 5
+        if rsi > 70 and last['close'] < ema:
+            return "put", "C", 5
             
-        return None
+        return "SKIP", None, None
 
-    def _fallback_signal(self, df: pd.DataFrame) -> Optional[str]:
-        # EMA Crossover fallback
-        crossover = IndicatorEngine.check_crossover(df, f'EMA_{self.config.ema_fast}', f'EMA_{self.config.ema_slow}')
-        last_rsi = df[f'RSI_{self.config.rsi_period}'].iloc[-1]
-        
-        if crossover == "up" and last_rsi < self.config.rsi_buy_below:
-            return "call"
-        if crossover == "down" and last_rsi > self.config.rsi_sell_above:
-            return "put"
-        return None
-
-    async def _execute_signal(self, direction: str):
-        amount = self.risk_manager.get_next_amount()
+    async def _execute_signal(self, direction: str, amount: float, duration: int, grade: str):
         pair = self.config.pair
-        duration = self.config.trade_duration
         
-        await self.telegram.send_notification(f"🔔 *SIGNAL DETECTED*\nDirection: {direction.upper()}\nPair: {pair}\nAmount: ${amount}")
+        await self.telegram.send_notification(
+            f"🔔 *SIGNAL DETECTED ({grade})*\n"
+            f"Direction: {direction.upper()}\n"
+            f"Pair: {pair}\n"
+            f"Amount: ${amount}\n"
+            f"Expiry: {duration//60} min"
+        )
         
         trade_info = await self.broker.execute_trade(pair, amount, direction, duration)
         if trade_info:
             self.last_trade_time = time.time()
-            # Wait for result
             trade_id = trade_info.get('id')
             await self.telegram.send_notification(f"🎯 *Trade Executed*\nID: `{trade_id}`")
-            
-            # Start a task to wait for result without blocking the main loop
-            asyncio.create_task(self._monitor_trade(trade_id, amount, direction))
+            asyncio.create_task(self._monitor_trade(trade_id, amount, direction, duration))
 
-    async def _monitor_trade(self, trade_id: str, amount: float, direction: str):
-        # Wait for trade duration + a bit of buffer
-        await asyncio.sleep(self.config.trade_duration + 2)
-        
+    async def _monitor_trade(self, trade_id: str, amount: float, direction: str, duration: int):
+        await asyncio.sleep(duration + 2)
         result = await self.broker.check_trade_result(trade_id)
         if result:
             profit = result.get('profit', 0)
             res_str = 'win' if profit > 0 else 'loss'
-            
             self.risk_manager.process_result(res_str, profit)
             
             trade_data = {
@@ -250,10 +236,7 @@ class TradingEngine:
             
             emoji = "💰" if res_str == 'win' else "📉"
             await self.telegram.send_notification(
-                f"{emoji} *Trade Result*\n"
-                f"Result: {res_str.upper()}\n"
+                f"{emoji} *Trade Result ({res_str.upper()})*\n"
                 f"Profit: ${profit:.2f}\n"
-                f"Total Profit: ${self.risk_manager.total_profit:.2f}"
+                f"Total Session: ${self.risk_manager.total_profit:.2f}"
             )
-        else:
-            logger.error(f"Could not verify result for trade {trade_id}")
