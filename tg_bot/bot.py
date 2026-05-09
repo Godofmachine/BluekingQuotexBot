@@ -32,8 +32,11 @@ class TelegramNotifier:
         self.application.add_handler(CommandHandler("current", self._current_cmd))
         self.application.add_handler(CommandHandler("stats", self._stats_cmd))
         self.application.add_handler(CommandHandler("force", self._force_cmd))
+        self.application.add_handler(CommandHandler("mode", self._mode_cmd))
         
         self.application.add_handler(CallbackQueryHandler(self._pair_selection_handler, pattern="^pair_"))
+        self.application.add_handler(CallbackQueryHandler(self._mode_selection_handler, pattern="^mode_"))
+        self.application.add_handler(CallbackQueryHandler(self._force_strategy_handler, pattern="^force_"))
         
         await self.application.initialize()
         await self.application.start()
@@ -79,6 +82,7 @@ class TelegramNotifier:
 /current - Show current selected pair
 /force - Execute one wick-strategy trade immediately
 /stats - Show win/loss stats for force trades only
+/mode - Switch between DEMO and REAL accounts
 /help - Show this message
 """
         await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
@@ -217,6 +221,41 @@ MARTINGALE: {cfg.martingale}
 
     async def _force_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.engine: return
+        keyboard = [
+            [InlineKeyboardButton("🤖 AUTO (AI Select)", callback_data="force_auto")],
+            [InlineKeyboardButton("🕯️ Wick Breakout", callback_data="force_wick")],
+            [InlineKeyboardButton("📈 Trend Rider", callback_data="force_trend")],
+            [InlineKeyboardButton("🌊 RSI Extreme", callback_data="force_rsi")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text("Select Force Trade Strategy:", reply_markup=reply_markup)
+
+    async def _force_strategy_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        await query.answer()
+        strategy = query.data.replace("force_", "")
+        
         import asyncio
-        asyncio.create_task(self.engine.execute_force_trade())
+        asyncio.create_task(self.engine.execute_force_trade(strategy))
+        await query.edit_message_text(f"🚀 Launching Force Trade: `{strategy.upper()}`")
+
+    async def _mode_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        keyboard = [
+            [InlineKeyboardButton("💎 DEMO", callback_data="mode_demo"),
+             InlineKeyboardButton("💰 REAL", callback_data="mode_real")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text("Select Account Mode:", reply_markup=reply_markup)
+
+    async def _mode_selection_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        await query.answer()
+        mode = query.data.replace("mode_", "").upper()
+        
+        if self.engine:
+            success = await self.engine.switch_mode(mode)
+            if success:
+                await query.edit_message_text(f"✅ Account mode switched to: `{mode}`")
+            else:
+                await query.edit_message_text("❌ Failed to switch account mode.")
 

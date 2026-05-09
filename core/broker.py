@@ -32,7 +32,7 @@ class QuotexBroker:
                 
                 if await self.client.check_connect():
                     self.is_connected = True
-                    logger.info("Connected successfully to account.")
+                    logger.info(f"Connected successfully to {self.environment.name} account.")
                     return True
                 else:
                     logger.warning("WebSocket handshake failed. Retrying...")
@@ -43,6 +43,21 @@ class QuotexBroker:
             
         self.is_connected = False
         return False
+
+    async def switch_account(self, environment: str):
+        """Switch account type between REAL and DEMO."""
+        new_env = AccountType.REAL if environment.upper() == "REAL" else AccountType.DEMO
+        if new_env == self.environment:
+            return True
+            
+        try:
+            await self.client.change_account("REAL" if new_env == AccountType.REAL else "DEMO")
+            self.environment = new_env
+            logger.info(f"Switched account to {self.environment.name}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to switch account: {e}")
+            return False
 
     async def ensure_connection(self):
         if not self.is_connected or not await self.client.check_connect():

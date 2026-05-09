@@ -262,37 +262,87 @@ class TradingEngine:
                 f"Total Session: ${self.risk_manager.total_profit:.2f}"
             )
 
-    async def execute_force_trade(self):
+    async def switch_mode(self, mode: str):
+        """Switch between REAL and DEMO."""
+        success = await self.broker.switch_account(mode)
+        if success:
+            # Critical: Reset risk manager so balance difference doesn't trigger stop loss
+            if self.risk_manager:
+                self.risk_manager.reset()
+            
+            # Give the server time to sync the account switch
+            await asyncio.sleep(3)
+            
+            await self.telegram.send_notification(f"🔄 *Account Mode Switched*\nNew Mode: `{mode.upper()}`\n_Limits Reset & Connection Synced_")
+        return success
+
+    async def execute_force_trade(self, strategy: str = "wick"):
         pair = self.get_current_pair()
         safe_pair = pair.replace("_", "\\_")
         
+        # Initial analysis for 'auto' mode
+        if strategy == "auto":
+            await self.telegram.send_notification("🤖 *AI Auto-Selector*: Analyzing market conditions...")
+            candles_eval = await self.broker.get_candles(pair, 60, 100)
+            df_eval = IndicatorEngine.calculate_indicators(candles_eval, self.config.ema_fast, self.config.ema_slow, self.config.rsi_period)
+            eval_rsi = df_eval.iloc[-1][f'RSI_{self.config.rsi_period}']
+            
+            if eval_rsi > 80 or eval_rsi < 20:
+                strategy = "rsi"
+                await self.telegram.send_notification("🎯 *Market is Over-Extended*: Picking `RSI EXTREME` for reversal.")
+            elif eval_rsi > 60 or eval_rsi < 40:
+                strategy = "trend"
+                await self.telegram.send_notification("📈 *Strong Trend Detected*: Picking `TREND RIDER` for momentum.")
+            else:
+                strategy = "wick"
+                await self.telegram.send_notification("🕯️ *Market is Ranging*: Picking `WICK BREAKOUT` for volatility.")
+
+        strat_name = "Wick Breakout"
+        if strategy == "trend": strat_name = "Trend Rider"
+        elif strategy == "rsi": strat_name = "RSI Extreme"
+
         await self.telegram.send_notification(
-            f"🔍 *FORCE TRADE ENGINE STARTED*\n"
+            f"🔍 *FORCE TRADE: {strat_name.upper()}*\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
             f"📊 Pair: {safe_pair}\n"
-            f"⏰ Waiting for new 1-minute candle..."
+            f"⏰ Analyzing market..."
         )
         
         prev_candle = await WickStrategy.wait_for_new_candle(self.broker, pair)
         if not prev_candle:
             await self.telegram.send_notification("⚠️ Could not fetch candle data. Try again.")
             return
+
+        # Get current RSI for filters
+        candles_rsi = await self.broker.get_candles(pair, 60, 100)
+        df_rsi = IndicatorEngine.calculate_indicators(candles_rsi, self.config.ema_fast, self.config.ema_slow, self.config.rsi_period)
+        last_rsi = df_rsi.iloc[-1][f'RSI_{self.config.rsi_period}']
+
+        direction, breakout_price = None, None
+
+        if strategy == "wick":
+            upper_wick = prev_candle['high']
+            lower_wick = prev_candle['low']
+            body_high = max(prev_candle['open'], prev_candle['close'])
+            body_low = min(prev_candle['open'], prev_candle['close'])
             
-        upper_wick = prev_candle['high']
-        lower_wick = prev_candle['low']
-        body_high = max(prev_candle['open'], prev_candle['close'])
-        body_low = min(prev_candle['open'], prev_candle['close'])
-        
-        await self.telegram.send_notification(
-            f"🕯️ *New candle formed*\n"
-            f"📈 Upper wick: {upper_wick:.5f}\n"
-            f"📉 Lower wick: {lower_wick:.5f}\n"
-            f"⚪ Body range: {body_low:.5f} - {body_high:.5f}\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"👀 Watching for breakout..."
-        )
-        
-        direction, breakout_price = await WickStrategy.monitor_wick_breakout(self.broker, pair, prev_candle)
+            await self.telegram.send_notification(
+                f"🕯️ *New candle formed*\n"
+                f"📈 Upper wick: {upper_wick:.5f}\n"
+                f"📉 Lower wick: {lower_wick:.5f}\n"
+                f"⚪ Body range: {body_low:.5f} - {body_high:.5f}\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"👀 Watching for breakout..."
+            )
+            direction, breakout_price = await WickStrategy.monitor_wick_breakout(self.broker, pair, prev_candle)
+            
+        elif strategy == "trend":
+            await self.telegram.send_notification(f"📈 *Trend Check*: RSI is {last_rsi:.1f}. Waiting for direction...")
+            direction, breakout_price = await WickStrategy.monitor_trend_rider(self.broker, pair, prev_candle, last_rsi)
+            
+        elif strategy == "rsi":
+            await self.telegram.send_notification(f"🌊 *RSI Check*: Current RSI is {last_rsi:.1f}. Waiting for extreme level...")
+            direction, breakout_price = await WickStrategy.monitor_rsi_extreme(self.broker, pair, last_rsi, prev_candle['close'])
         
         if not direction:
             await self.telegram.send_notification("⏰ No breakout detected. Try /force again.")
@@ -305,6 +355,15 @@ class TradingEngine:
         balance = await self.broker.get_balance()
         amount = round(balance * 0.05, 2)
         
+        # Enforce Quotex minimum trade amount ($1)
+        if amount < 1.0:
+            if balance >= 1.0:
+                amount = 1.0
+                await self.telegram.send_notification("⚠️ *Stake Adjusted*: 5% was below $1.00. Using minimum stake of $1.00.")
+            else:
+                await self.telegram.send_notification(f"❌ *Insufficient Balance*: Your balance is only ${balance:.2f}. Minimum trade is $1.00.")
+                return
+
         await self.telegram.send_notification(
             f"💥 *BREAKOUT DETECTED!*\n"
             f"{emoji_dir} Price broke {break_type} wick at {breakout_price:.5f}\n"
@@ -314,9 +373,9 @@ class TradingEngine:
             f"⏳ Trade in progress..."
         )
         
-        trade_info = await WickStrategy.execute_5sec_trade(self.broker, pair, direction, amount)
+        trade_info = await self.broker.execute_trade(pair, amount, direction, duration=5)
         if not trade_info:
-            await self.telegram.send_notification("⚠️ Failed to execute trade.")
+            await self.telegram.send_notification("❌ *Trade Failed*: Quotex rejected the request. Check your balance and ensure you are in a supported region.")
             return
             
         trade_id = trade_info.get('id')

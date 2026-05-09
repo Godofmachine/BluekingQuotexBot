@@ -15,16 +15,23 @@ class WickStrategy:
         if sleep_time < 60:
             await asyncio.sleep(sleep_time)
             
-        # Add a small buffer to ensure broker has registered the new candle
-        await asyncio.sleep(1)
+        # Increased buffer to ensure broker has registered the new candle
+        await asyncio.sleep(3)
         
-        # Fetch the closed candle (the one that just finished)
-        candles = await broker.get_candles(pair, timeframe_seconds=60, amount=100)
-        if not candles or len(candles) < 2:
-            return None
+        # Retry logic
+        for attempt in range(3):
+            logger.info(f"Fetching candle data (Attempt {attempt+1}/3)...")
+            candles = await broker.get_candles(pair, timeframe_seconds=60, amount=100)
             
-        prev_candle = candles[-2] # The completely formed one
-        return prev_candle
+            if candles and len(candles) >= 2:
+                prev_candle = candles[-2]
+                logger.info(f"Successfully fetched {len(candles)} candles.")
+                return prev_candle
+                
+            logger.warning(f"Attempt {attempt+1} failed. No candles returned. Waiting...")
+            await asyncio.sleep(2)
+            
+        return None
 
     @staticmethod
     async def monitor_wick_breakout(broker, pair: str, prev_candle: dict):
@@ -57,3 +64,25 @@ class WickStrategy:
         # Note: Quotex minimum expiry is usually 5 seconds
         trade_info = await broker.execute_trade(pair, amount, direction, duration=5)
         return trade_info
+
+    @staticmethod
+    async def monitor_trend_rider(broker, pair: str, prev_candle: dict, rsi: float):
+        """Monitor for trend following (Follow candle color if RSI agrees)"""
+        is_green = prev_candle['close'] > prev_candle['open']
+        
+        if is_green and rsi > 55:
+            return "call", prev_candle['close']
+        elif not is_green and rsi < 45:
+            return "put", prev_candle['close']
+            
+        return None, None
+
+    @staticmethod
+    async def monitor_rsi_extreme(broker, pair: str, rsi: float, current_price: float):
+        """Monitor for RSI extremes (Reversal)"""
+        if rsi > 80:
+            return "put", current_price
+        elif rsi < 20:
+            return "call", current_price
+            
+        return None, None

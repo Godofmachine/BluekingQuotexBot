@@ -26,6 +26,17 @@ class RiskManager:
         self.is_paused = False
         self.pause_reason = ""
 
+    def reset(self):
+        """Reset session stats when switching accounts or starting a new day."""
+        self.consecutive_losses = 0
+        self.consecutive_wins = 0
+        self.total_profit = 0.0
+        self.trades_today = 0
+        self.starting_balance = 0.0
+        self.is_paused = False
+        self.pause_reason = ""
+        logger.info("Risk Manager session stats reset.")
+
     def set_starting_balance(self, balance: float):
         if self.starting_balance == 0:
             self.starting_balance = balance
