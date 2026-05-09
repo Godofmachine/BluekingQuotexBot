@@ -77,8 +77,10 @@ class QuotexBroker:
         direction: 'call' (BUY) or 'put' (SELL)
         """
         logger.info(f"Executing {direction.upper()} trade: {pair} | Amount: {amount} | Duration: {duration}s")
+        print(f"DEBUG: amount={amount}, pair={pair}, direction={direction}")
         try:
             status, trade_info = await self.client.buy(amount, pair, direction, duration)
+            print(f"DEBUG: status={status}, buy_info={trade_info}")
             if status:
                 logger.info(f"Trade placed successfully: {trade_info}")
                 return trade_info

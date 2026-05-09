@@ -1,7 +1,7 @@
 import logging
 from typing import Callable, Optional
-from telegram import Update, Bot
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram import Update, Bot, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler
 from telegram.constants import ParseMode
 
 logger = logging.getLogger("antigravity.telegram")
@@ -28,6 +28,12 @@ class TelegramNotifier:
         self.application.add_handler(CommandHandler("resume", self._resume_cmd))
         self.application.add_handler(CommandHandler("strategy", self._strategy_cmd))
         self.application.add_handler(CommandHandler("help", self._help_cmd))
+        self.application.add_handler(CommandHandler("pairs", self._pairs_cmd))
+        self.application.add_handler(CommandHandler("current", self._current_cmd))
+        self.application.add_handler(CommandHandler("stats", self._stats_cmd))
+        self.application.add_handler(CommandHandler("force", self._force_cmd))
+        
+        self.application.add_handler(CallbackQueryHandler(self._pair_selection_handler, pattern="^pair_"))
         
         await self.application.initialize()
         await self.application.start()
@@ -69,6 +75,10 @@ class TelegramNotifier:
 /pause - Pause trading
 /resume - Resume trading
 /strategy - Show current strategy
+/pairs - Show all available pairs as buttons
+/current - Show current selected pair
+/force - Execute one wick-strategy trade immediately
+/stats - Show win/loss stats for force trades only
 /help - Show this message
 """
         await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
@@ -80,7 +90,7 @@ class TelegramNotifier:
 📊 *Dashboard*
 ━━━━━━━━━━━━━━
 ✅ *Status:* {"RUNNING" if not self.engine.is_paused else "PAUSED"}
-📈 *Pair:* {stats['pair']}
+📈 *Pair:* {stats['pair'].replace('_', '\\_')}
 ⏱️ *Uptime:* {stats['uptime']}
 💰 *Balance:* ${stats['balance']:.2f}
 💵 *Profit:* ${stats['profit']:.2f}
@@ -125,7 +135,7 @@ class TelegramNotifier:
         strat_msg = f"""
 📜 *Current Strategy*
 ━━━━━━━━━━━━━━
-PAIR: {cfg.pair}
+PAIR: {cfg.pair.replace('_', '\\_')}
 TIMEFRAME: {cfg.timeframe}
 AMOUNT: {cfg.trade_amount}
 EMA: {cfg.ema_fast}/{cfg.ema_slow}
@@ -134,3 +144,79 @@ MARTINGALE: {cfg.martingale}
 ━━━━━━━━━━━━━━
 """
         await update.message.reply_text(strat_msg, parse_mode=ParseMode.MARKDOWN)
+
+    async def _pairs_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        pairs = [
+            "EURUSD_otc", "GBPUSD_otc", "USDJPY_otc",
+            "AUDUSD_otc", "USDCAD_otc", "EURJPY_otc",
+            "GBPJPY_otc", "XAUUSD_otc", "BTCUSD_otc"
+        ]
+        keyboard = []
+        for i in range(0, len(pairs), 3):
+            row = [InlineKeyboardButton(pair, callback_data=f"pair_{pair}") for pair in pairs[i:i+3]]
+            keyboard.append(row)
+            
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text("Please select a trading pair:", reply_markup=reply_markup)
+
+    async def _pair_selection_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        await query.answer()
+        pair = query.data.replace("pair_", "")
+        
+        if self.engine:
+            self.engine.set_current_pair(pair)
+            
+        safe_pair = pair.replace("_", "\\_")
+        await query.edit_message_text(f"✅ Trading pair changed to {safe_pair}", parse_mode=ParseMode.MARKDOWN)
+
+    async def _current_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.engine: return
+        pair = self.engine.get_current_pair()
+        safe_pair = pair.replace("_", "\\_")
+        await update.message.reply_text(f"🎯 Current selected pair: {safe_pair}", parse_mode=ParseMode.MARKDOWN)
+
+    async def _stats_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.engine: return
+        import os
+        log_file = "storage/force_trades.log"
+        if not os.path.exists(log_file):
+            await update.message.reply_text("No force trades recorded yet.")
+            return
+            
+        wins = 0
+        losses = 0
+        profit = 0.0
+        
+        with open(log_file, "r") as f:
+            for line in f:
+                if "WIN" in line: wins += 1
+                elif "LOSS" in line: losses += 1
+                
+                parts = line.split(",")
+                for p in parts:
+                    if "Profit: " in p:
+                        try:
+                            val = p.split("Profit: ")[1].strip()
+                            profit += float(val.replace("+", "").replace("$", ""))
+                        except: pass
+                        
+        total = wins + losses
+        win_rate = (wins/total*100) if total > 0 else 0
+        
+        stats_msg = f"""
+⚡ *Force Trades Stats*
+━━━━━━━━━━━━━━
+🏆 Wins: {wins}
+❌ Losses: {losses}
+📉 Win Rate: {win_rate:.1f}%
+💰 Total Profit: ${profit:.2f}
+━━━━━━━━━━━━━━
+"""
+        await update.message.reply_text(stats_msg, parse_mode=ParseMode.MARKDOWN)
+
+    async def _force_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.engine: return
+        import asyncio
+        asyncio.create_task(self.engine.execute_force_trade())
+

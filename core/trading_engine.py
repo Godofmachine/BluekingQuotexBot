@@ -11,6 +11,7 @@ from core.broker import QuotexBroker
 from core.strategy_parser import StrategyParser, StrategyConfig
 from core.risk_manager import RiskManager
 from indicators.engine import IndicatorEngine
+from core.wick_strategy import WickStrategy
 from tg_bot.bot import TelegramNotifier
 
 logger = logging.getLogger("antigravity.engine")
@@ -45,6 +46,19 @@ class TradingEngine:
         with open(self.storage_path, "w") as f:
             json.dump(self.history, f, indent=4)
 
+    def set_current_pair(self, pair: str):
+        if self.config:
+            self.config.pair = pair
+        with open("current_pair.txt", "w") as f:
+            f.write(pair)
+
+    def get_current_pair(self) -> str:
+        if os.path.exists("current_pair.txt"):
+            with open("current_pair.txt", "r") as f:
+                pair = f.read().strip()
+                if pair: return pair
+        return "EURUSD_otc"
+
     async def reload_strategy(self):
         mtime = os.path.getmtime(self.strategy_path)
         if mtime > self.last_strategy_mtime:
@@ -60,6 +74,8 @@ class TradingEngine:
                             take_profit=self.config.take_profit
                         )
                     self.last_strategy_mtime = mtime
+                    # Override pair with current_pair.txt if it exists
+                    self.config.pair = self.get_current_pair()
                     logger.info(f"Strategy reloaded: {self.config.pair}")
                     # Escape underscores for Telegram markdown
                     safe_pair = self.config.pair.replace("_", "\\_")
@@ -219,29 +235,122 @@ class TradingEngine:
     async def _monitor_trade(self, trade_id: str, amount: float, direction: str, duration: int):
         await asyncio.sleep(duration + 2)
         result = await self.broker.check_trade_result(trade_id)
-        if result:
-            profit = result.get('profit', 0)
+        if result and isinstance(result, tuple) and len(result) >= 2:
+            status_str, profit = result
             res_str = 'win' if profit > 0 else 'loss'
+            
             self.risk_manager.process_result(res_str, profit)
             
-            trade_data = {
-                "id": trade_id,
-                "timestamp": int(time.time()),
+            self.history.append({
+                "timestamp": datetime.now().isoformat(),
                 "pair": self.config.pair,
-                "direction": direction,
                 "amount": amount,
-                "profit": profit,
-                "result": res_str
-            }
-            self.history.append(trade_data)
+                "direction": direction,
+                "duration": duration,
+                "grade": "AUTO",
+                "result": res_str,
+                "profit": profit
+            })
             self._save_history()
             
-            emoji = "💰" if res_str == 'win' else "📉"
-            emoji = "💰" if res_str == 'win' else "📉"
+            emoji = "🎉" if res_str == 'win' else "😢"
             safe_pair = self.config.pair.replace("_", "\\_")
             await self.telegram.send_notification(
-                f"{emoji} *Trade Result ({res_str.upper()})*\n"
+                f"✅ *TRADE FINISHED: {res_str.upper()} {emoji}*\n"
                 f"Pair: {safe_pair}\n"
                 f"Profit: ${profit:.2f}\n"
                 f"Total Session: ${self.risk_manager.total_profit:.2f}"
             )
+
+    async def execute_force_trade(self):
+        pair = self.get_current_pair()
+        safe_pair = pair.replace("_", "\\_")
+        
+        await self.telegram.send_notification(
+            f"🔍 *FORCE TRADE ENGINE STARTED*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📊 Pair: {safe_pair}\n"
+            f"⏰ Waiting for new 1-minute candle..."
+        )
+        
+        prev_candle = await WickStrategy.wait_for_new_candle(self.broker, pair)
+        if not prev_candle:
+            await self.telegram.send_notification("⚠️ Could not fetch candle data. Try again.")
+            return
+            
+        upper_wick = prev_candle['high']
+        lower_wick = prev_candle['low']
+        body_high = max(prev_candle['open'], prev_candle['close'])
+        body_low = min(prev_candle['open'], prev_candle['close'])
+        
+        await self.telegram.send_notification(
+            f"🕯️ *New candle formed*\n"
+            f"📈 Upper wick: {upper_wick:.5f}\n"
+            f"📉 Lower wick: {lower_wick:.5f}\n"
+            f"⚪ Body range: {body_low:.5f} - {body_high:.5f}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"👀 Watching for breakout..."
+        )
+        
+        direction, breakout_price = await WickStrategy.monitor_wick_breakout(self.broker, pair, prev_candle)
+        
+        if not direction:
+            await self.telegram.send_notification("⏰ No breakout detected. Try /force again.")
+            return
+            
+        action = "PUT (SELL)" if direction == "put" else "CALL (BUY)"
+        break_type = "ABOVE upper" if direction == "put" else "BELOW lower"
+        emoji_dir = "⬆️" if direction == "put" else "⬇️"
+        
+        balance = await self.broker.get_balance()
+        amount = round(balance * 0.05, 2)
+        
+        await self.telegram.send_notification(
+            f"💥 *BREAKOUT DETECTED!*\n"
+            f"{emoji_dir} Price broke {break_type} wick at {breakout_price:.5f}\n"
+            f"🎯 Executing {action} for 5 seconds\n"
+            f"💰 Amount: ${amount:.2f}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"⏳ Trade in progress..."
+        )
+        
+        trade_info = await WickStrategy.execute_5sec_trade(self.broker, pair, direction, amount)
+        if not trade_info:
+            await self.telegram.send_notification("⚠️ Failed to execute trade.")
+            return
+            
+        trade_id = trade_info.get('id')
+        
+        # pyquotex check_win returns a tuple: (status_string, profit_float)
+        result = await self.broker.check_trade_result(trade_id)
+        if result and isinstance(result, tuple) and len(result) >= 2:
+            status_str, profit = result
+            res_str = 'WIN! 🎉' if profit > 0 else 'LOSS! 😢'
+            new_balance = await self.broker.get_balance()
+            
+            await self.telegram.send_notification(
+                f"✅ *TRADE RESULT: {res_str}*\n"
+                f"📈 Profit: {'+' if profit > 0 else ''}${profit:.2f}\n"
+                f"💰 New Balance: ${new_balance:.2f}\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━"
+            )
+            
+            # Record in global engine history so /status updates
+            self.risk_manager.process_result("win" if profit > 0 else "loss", profit)
+            self.history.append({
+                "timestamp": datetime.now().isoformat(),
+                "pair": pair,
+                "amount": amount,
+                "direction": direction,
+                "duration": 5,
+                "grade": "FORCE",
+                "result": "win" if profit > 0 else "loss",
+                "profit": profit
+            })
+            self._save_history()
+            
+            # Log to force_trades.log
+            with open("storage/force_trades.log", "a") as f:
+                f.write(f"{datetime.now().isoformat()}, Pair: {pair}, Direction: {direction}, Result: {res_str}, Profit: ${profit:.2f}, Balance: ${new_balance:.2f}\n")
+        else:
+            await self.telegram.send_notification("⚠️ Trade finished but could not retrieve result status.")

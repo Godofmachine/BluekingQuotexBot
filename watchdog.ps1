@@ -1,10 +1,7 @@
-# Antigravity Windows Watchdog & Keep-Alive Script (V2 - Anti-Spam)
+# Antigravity Windows Watchdog & Keep-Alive Script (V3 - Single Window)
 # ------------------------------------------------------------------
 
-$BotScript = "main.py"
-$CheckInterval = 30 
-$FailCount = 0
-
+# Prevent the computer from sleeping
 Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
@@ -17,24 +14,28 @@ public class SleepUtil {
 "@
 [SleepUtil]::SetThreadExecutionState([SleepUtil]::ES_CONTINUOUS -bor [SleepUtil]::ES_SYSTEM_REQUIRED)
 
-Write-Host "🚀 Watchdog V2 Active" -ForegroundColor Cyan
+Write-Host "------------------------------------------" -ForegroundColor Cyan
+Write-Host "🚀 Watchdog V3 Active (Single Window Mode)" -ForegroundColor Cyan
+Write-Host "------------------------------------------" -ForegroundColor Cyan
+
+$FailCount = 0
 
 while ($true) {
-    $process = Get-Process python -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like "*$BotScript*" }
-
-    if (-not $process) {
-        if ($FailCount -lt 5) {
-            Write-Host "$(Get-Date): Bot closed. Restarting..." -ForegroundColor Yellow
-            Start-Process python -ArgumentList "main.py" -WorkingDirectory $PSScriptRoot
-            $FailCount++
-        } else {
-            Write-Host "⚠️ Bot has crashed too many times. Waiting 5 minutes before trying again to avoid spam." -ForegroundColor Red
-            Start-Sleep -Seconds 300
-            $FailCount = 0
-        }
+    Write-Host "$(Get-Date): [SYSTEM] Starting Antigravity Trading Engine..." -ForegroundColor Green
+    
+    # Run the bot directly in THIS window (not a new one)
+    python main.py
+    
+    # When the bot closes or crashes, the script continues here
+    Write-Host "$(Get-Date): [SYSTEM] Bot has closed or crashed." -ForegroundColor Yellow
+    
+    if ($FailCount -lt 5) {
+        Write-Host "Restarting in 5 seconds..." -ForegroundColor Cyan
+        Start-Sleep -Seconds 5
+        $FailCount++
     } else {
-        $FailCount = 0 # Reset counter if bot is running successfully
+        Write-Host "⚠️ Bot has crashed too many times. Waiting 5 minutes to avoid spam." -ForegroundColor Red
+        Start-Sleep -Seconds 300
+        $FailCount = 0
     }
-
-    Start-Sleep -Seconds $CheckInterval
 }
