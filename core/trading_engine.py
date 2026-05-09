@@ -61,7 +61,9 @@ class TradingEngine:
                         )
                     self.last_strategy_mtime = mtime
                     logger.info(f"Strategy reloaded: {self.config.pair}")
-                    await self.telegram.send_notification(f"🔄 *Strategy Updated*\nPair: {self.config.pair}")
+                    # Escape underscores for Telegram markdown
+                    safe_pair = self.config.pair.replace("_", "\\_")
+                    await self.telegram.send_notification(f"🔄 *Strategy Updated*\nPair: {safe_pair}")
             except Exception as e:
                 logger.error(f"Error reloading strategy: {e}")
 
@@ -235,8 +237,11 @@ class TradingEngine:
             self._save_history()
             
             emoji = "💰" if res_str == 'win' else "📉"
+            emoji = "💰" if res_str == 'win' else "📉"
+            safe_pair = self.config.pair.replace("_", "\\_")
             await self.telegram.send_notification(
                 f"{emoji} *Trade Result ({res_str.upper()})*\n"
+                f"Pair: {safe_pair}\n"
                 f"Profit: ${profit:.2f}\n"
                 f"Total Session: ${self.risk_manager.total_profit:.2f}"
             )

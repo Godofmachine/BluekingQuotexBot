@@ -15,18 +15,34 @@ class QuotexBroker:
         self.environment = AccountType.REAL if environment.upper() == "REAL" else AccountType.DEMO
         self.is_connected = False
 
-    async def connect(self):
-        logger.info("Connecting to Quotex...")
-        try:
-            await self.client.connect()
-            await self.client.change_account("REAL" if self.environment == AccountType.REAL else "DEMO")
-            self.is_connected = True
-            logger.info(f"Connected successfully to {self.environment.name} account.")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to connect: {e}")
-            self.is_connected = False
-            return False
+    async def connect(self, retries=3):
+        for i in range(retries):
+            logger.info(f"Connecting to Quotex (Attempt {i+1}/{retries})...")
+            try:
+                check, reason = await self.client.connect()
+                if not check:
+                    logger.error(f"Connection failed: {reason}")
+                    await asyncio.sleep(5)
+                    continue
+                    
+                await self.client.change_account("REAL" if self.environment == AccountType.REAL else "DEMO")
+                
+                # Critical: Give cloud network time to establish WebSocket
+                await asyncio.sleep(5)
+                
+                if await self.client.check_connect():
+                    self.is_connected = True
+                    logger.info("Connected successfully to account.")
+                    return True
+                else:
+                    logger.warning("WebSocket handshake failed. Retrying...")
+            except Exception as e:
+                logger.error(f"Failed to connect: {e}")
+            
+            await asyncio.sleep(5)
+            
+        self.is_connected = False
+        return False
 
     async def ensure_connection(self):
         if not self.is_connected or not await self.client.check_connect():
